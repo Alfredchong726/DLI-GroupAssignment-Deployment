@@ -44,7 +44,7 @@ headless = true\n\
 enableCORS = false\n\
 enableXsrfProtection = false\n\
 port = 8501\n\
-address = 0.0.0.0\n\
+address = \"0.0.0.0\"\n\
 " > .streamlit/config.toml
 
 # Expose port
