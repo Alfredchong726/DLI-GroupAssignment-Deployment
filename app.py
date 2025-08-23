@@ -1,129 +1,111 @@
-# app.py
-import re, json, joblib, ipaddress
-from urllib.parse import urlparse
+# app.py (fixed: set_page_config is the first Streamlit call)
+
+import os, json, joblib, re
 import numpy as np
 import pandas as pd
 import streamlit as st
+from urllib.parse import urlparse
 
-# ---------- LOAD ----------
-@st.cache_resource
-def load_assets():
-    model = joblib.load("phish_model.joblib")
-    feat_names = json.load(open("feature_names.json"))
-    return model, feat_names
+# ---- MUST be the first Streamlit command ----
+st.set_page_config(page_title="Phishing URL Detector", page_icon="🛡️", layout="centered")
 
-model, FEATURE_NAMES = load_assets()
+# ---------- load artifacts ----------
+ART_DIR = os.environ.get("ART_DIR", "artifacts")
+MODEL_PATH = os.path.join(ART_DIR, "xgb_model.joblib")
+COLUMNS_PATH = os.path.join(ART_DIR, "feature_columns.json")
+MEDIANS_PATH = os.path.join(ART_DIR, "feature_medians.json")
 
-# ---------- URL -> BASIC FEATURES (URL-only, safe offline) ----------
-SHORTENERS = {
-    "bit.ly","goo.gl","t.co","ow.ly","is.gd","buff.ly","tinyurl.com","lnkd.in",
-    "rebrand.ly","cutt.ly","t.ly","s.id","v.gd","adf.ly","chilp.it","clck.ru",
-    "fb.me","youtu.be"
-}
+@st.cache_resource(show_spinner=False)
+def load_artifacts():
+    model = joblib.load(MODEL_PATH)
+    with open(COLUMNS_PATH, "r") as f:
+        columns = json.load(f)
+    with open(MEDIANS_PATH, "r") as f:
+        medians = json.load(f)
+    return model, columns, medians
 
-def parse_url(url: str):
-    u = url.strip()
-    if not re.match(r'^https?://', u, flags=re.I):
-        u = "http://" + u
-    p = urlparse(u)
-    host = (p.hostname or "").lower()
-    path = p.path or ""
-    return u, host, path
+model, FEATURE_COLUMNS, COL_MEDIANS = load_artifacts()
 
-def is_ip(host: str) -> bool:
-    try:
-        ipaddress.ip_address(host)
-        return True
-    except Exception:
-        return False
+# ---------- URL feature extraction (7 structural features) ----------
+SHORTENERS = set("""
+bit.ly goo.gl t.co ow.ly is.gd buff.ly tinyurl.com lnkd.in rebrand.ly cutt.ly
+t.ly s.id v.gd adf.ly chilp.it clck.ru fb.me youtu.be
+""".split())
 
-def subdomain_count(host: str) -> int:
-    parts = [s for s in host.split('.') if s]
-    if len(parts) <= 2:   # e.g., example.com
-        return 0
-    return len(parts) - 2 # everything before SLD+TLD
+def _strip_scheme_www(u: str) -> str:
+    s = re.sub(r'^\s*https?://', '', u.strip(), flags=re.I)
+    s = re.sub(r'^\s*www\.', '', s, flags=re.I)
+    return s
 
-# Fuzzy column matcher (handles weird Mendeley names like "having_IPhaving_IP_Address")
-_norm = lambda s: re.sub(r'[^a-z0-9]', '', s.lower())
-def find_col(candidates):
-    norm_map = {_norm(c): c for c in FEATURE_NAMES}
-    for cand in candidates:
-        key = _norm(cand)
-        if key in norm_map:
-            return norm_map[key]
-    # fallback: substring contains
-    for cand in candidates:
-        key = _norm(cand)
-        for k, v in norm_map.items():
-            if key in k:
-                return v
-    return None
+def _is_ip(host: str) -> bool:
+    return bool(re.fullmatch(r'\d{1,3}(?:\.\d{1,3}){3}', host))
 
-def url_to_feature_row(url: str) -> pd.DataFrame:
-    # start with NaN for every feature
-    row = {c: np.nan for c in FEATURE_NAMES}
+def _subdomain_count(host: str) -> int:
+    parts = [p for p in host.split('.') if p]
+    return max(0, len(parts) - 2)  # subdomains beyond SLD+TLD
 
-    raw, host, path = parse_url(url)
+def _has_double_slash_in_path(p: str) -> bool:
+    return '//' in p
 
-    # Compute URL-derivable features
-    f_ip   = 1 if is_ip(host) else 0
-    f_len  = len(raw)
-    f_short= 1 if host in SHORTENERS else 0
-    f_at   = 1 if '@' in raw else 0
-    # after scheme, any '//' in the remaining path counts as redirect-ish
-    rest = raw.split("://", 1)[1] if "://" in raw else raw
-    f_dbls = 1 if '//' in rest.replace('//', '', 1) else 0
-    f_dash = 1 if '-' in host else 0
-    f_subc = subdomain_count(host)
+def _is_shortener(host: str) -> bool:
+    return host.lower() in SHORTENERS
 
-    # Map into your training columns (set only if column exists)
-    mapping = {
-        "having_ip": (f_ip, ["having_IP_Address","having_IPhaving_IP_Address","havingipaddress","ip_address"]),
-        "url_length": (f_len, ["URL_Length","URLURL_Length","urllength"]),
-        "shortener": (f_short, ["Shortining_Service","shortening_service","shortiningservice"]),
-        "at_symbol": (f_at, ["having_At_Symbol","having_at_symbol"]),
-        "double_slash": (f_dbls, ["double_slash_redirecting","double//","double_slash"]),
-        "prefix_suffix": (f_dash, ["Prefix_Suffix","prefix_suffix","dash_in_domain"]),
-        "subdomain": (f_subc, ["having_Sub_Domain","having_sub_domain","subdomain_count"]),
-        # optional: host contains 'https' token
-        "https_token": (1 if "https" in host else 0, ["HTTPS_token","https_token"])
+def url_struct_features(url: str) -> dict:
+    raw = url.strip()
+    url_noscheme = _strip_scheme_www(raw)
+    parsed = urlparse("http://" + url_noscheme)  # ensure parsable
+    host = parsed.hostname or ""
+    path = parsed.path or ""
+    return {
+        "having_IP_Address": 1 if _is_ip(host) else 0,
+        "URL_Length": float(len(raw)),
+        "Shortining_Service": 1 if _is_shortener(host) else 0,
+        "having_At_Symbol": 1 if '@' in raw else 0,
+        "double_slash_redirecting": 1 if _has_double_slash_in_path(path) else 0,
+        "Prefix_Suffix": 1 if '-' in host else 0,
+        "having_Sub_Domain": float(_subdomain_count(host)),
     }
 
-    for _, (val, aliases) in mapping.items():
-        col = find_col(aliases)
-        if col:
-            row[col] = val
+STRUCT_COLS = [
+    "having_IP_Address","URL_Length","Shortining_Service","having_At_Symbol",
+    "double_slash_redirecting","Prefix_Suffix","having_Sub_Domain"
+]
 
-    # Build 1-row DataFrame in correct training order
-    X = pd.DataFrame([row], columns=FEATURE_NAMES)
-    return X
+def build_model_input(url: str) -> pd.DataFrame:
+    # start with medians so we have every column the model expects
+    row = {c: COL_MEDIANS.get(c, 0.0) for c in FEATURE_COLUMNS}
+    # override with structural values we can compute from the URL
+    s = url_struct_features(url)
+    for k, v in s.items():
+        if k in row:
+            row[k] = float(v)
+    return pd.DataFrame([[row[c] for c in FEATURE_COLUMNS]], columns=FEATURE_COLUMNS), s
 
 # ---------- UI ----------
-st.set_page_config(page_title="Phishing URL Detector", page_icon="🛡️", layout="centered")
-st.title("🛡️ Phishing URL Detector")
-st.caption("Type a URL. We compute URL-only features and use your trained XGBoost model.")
+st.title("🛡️ Phishing URL Detector (XGBoost)")
+st.markdown(
+    "Paste a URL below. The app derives **URL-only structural features** "
+    "and fills any remaining features with the training medians you exported."
+)
 
-url = st.text_input("Enter URL to scan", placeholder="https://example.com/login")
-threshold = st.slider("Decision threshold (phishing if probability ≥ threshold)", 0.10, 0.90, 0.50, 0.01)
+url_input = st.text_input("URL", placeholder="e.g., https://secure-login.example.com/account//verify")
 
-if st.button("Scan URL") and url.strip():
-    try:
-        Xrow = url_to_feature_row(url)
-        proba = float(model.predict_proba(Xrow)[:, 1][0])
-        pred = int(proba >= threshold)
+if st.button("Predict", type="primary") and url_input.strip():
+    X_one, used_struct = build_model_input(url_input)
+    proba = float(model.predict_proba(X_one)[0, 1])
+    pred = int(proba >= 0.5)
 
-        st.metric("Phishing probability", f"{proba:.3f}")
-        if pred == 1:
-            st.error("Prediction: PHISHING")
-        else:
-            st.success("Prediction: BENIGN")
+    st.subheader("Result")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Prediction", "Phishing" if pred == 1 else "Benign")
+    with col2:
+        st.metric("Probability (phishing)", f"{proba:.3f}")
 
-        # Show which URL-derived features were filled
-        filled = Xrow.iloc[0].dropna()
-        st.subheader("URL-derived features used")
-        st.write(filled.to_frame("value"))
-    except Exception as e:
-        st.error(str(e))
+    with st.expander("Show derived URL features"):
+        st.json(used_struct)
 
-st.divider()
-st.caption("Note: Only URL-string features are computed. Other training features are left as NaN (XGBoost can handle missing).")
+    with st.expander("Model input preview (first 20 columns)"):
+        st.dataframe(X_one.iloc[:, :20])
+
+st.caption("Tip: For best fidelity, train on URL-only features or ensure inference fills columns consistently.")

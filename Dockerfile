@@ -1,12 +1,31 @@
+# Dockerfile
 FROM python:3.11-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 && rm -rf /var/lib/apt/lists/*
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+# System deps (slim image + wheels, keep small)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential ca-certificates curl && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py phish_model.joblib feature_names.json ./
+# Install Python deps
+RUN pip install --no-cache-dir \
+    streamlit \
+    scikit-learn \
+    xgboost \
+    pandas \
+    numpy \
+    joblib
 
-EXPOSE 8501
-CMD ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+# Copy app and artifacts
+COPY app.py /app/app.py
+COPY artifacts /app/artifacts
+
+# Streamlit on Render must bind to $PORT
+EXPOSE 8000
+ENV ART_DIR=/app/artifacts
+
+CMD ["bash", "-lc", "streamlit run app.py --server.port=${PORT:-8000} --server.address=0.0.0.0"]
