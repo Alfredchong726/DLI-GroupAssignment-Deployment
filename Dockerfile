@@ -1,31 +1,53 @@
-# Dockerfile
-FROM python:3.11-slim
+# Use Python 3.9 slim image as base
+FROM python:3.9-slim
 
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-
-# System deps (slim image + wheels, keep small)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential ca-certificates curl && \
-    rm -rf /var/lib/apt/lists/*
-
+# Set working directory in container
 WORKDIR /app
 
-# Install Python deps
-RUN pip install --no-cache-dir \
-    streamlit \
-    scikit-learn \
-    xgboost \
-    pandas \
-    numpy \
-    joblib
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV STREAMLIT_SERVER_PORT=8501
+ENV STREAMLIT_SERVER_ADDRESS=0.0.0.0
+ENV STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
 
-# Copy app and artifacts
-COPY app.py /app/app.py
-COPY artifacts /app/artifacts
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    curl \
+    software-properties-common \
+    && rm -rf /var/lib/apt/lists/*
 
-# Streamlit on Render must bind to $PORT
-EXPOSE 8000
-ENV ART_DIR=/app/artifacts
+# Copy requirements file
+COPY requirements.txt .
 
-CMD ["bash", "-lc", "streamlit run app.py --server.port=${PORT:-8000} --server.address=0.0.0.0"]
+# Install Python dependencies
+RUN pip install --no-cache-dir --upgrade pip
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application files
+COPY app.py .
+COPY phish_model.pkl .
+COPY feature_columns.pkl .
+COPY model_info.pkl .
+
+# Create .streamlit directory for configuration
+RUN mkdir -p .streamlit
+
+# Create Streamlit configuration file
+RUN echo "\
+[server]\n\
+headless = true\n\
+enableCORS = false\n\
+enableXsrfProtection = false\n\
+port = 8501\n\
+address = 0.0.0.0\n\
+" > .streamlit/config.toml
+
+# Expose port
+EXPOSE 8501
+
+# Health check
+HEALTHCHECK CMD curl --fail http://localhost:8501/_stcore/health
+
+# Run the application
+CMD ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
