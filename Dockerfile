@@ -9,13 +9,17 @@ ENV PYTHONUNBUFFERED=1
 ENV STREAMLIT_SERVER_PORT=8501
 ENV STREAMLIT_SERVER_ADDRESS=0.0.0.0
 ENV STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+ENV DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
+# Install system dependencies with retry logic
+RUN apt-get clean && \
+    apt-get update --fix-missing && \
+    apt-get install -y --no-install-recommends \
     build-essential \
     curl \
-    software-properties-common \
-    && rm -rf /var/lib/apt/lists/*
+    ca-certificates \
+    && apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # Copy requirements file
 COPY requirements.txt .
@@ -26,7 +30,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application files
 COPY app.py .
-COPY phish_model.pkl .
+COPY xgboost_phishing_model.pkl .
 COPY feature_columns.pkl .
 COPY model_info.pkl .
 
