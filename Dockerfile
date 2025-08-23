@@ -30,7 +30,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application files
 COPY app.py .
-COPY xgboost_phishing_model.pkl .
+COPY phish_model.pkl .
 COPY feature_columns.pkl .
 COPY model_info.pkl .
 
