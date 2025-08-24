@@ -1,18 +1,21 @@
 import streamlit as st
-import pandas as pd
+import joblib, json
 import numpy as np
-import pickle
-import joblib
-import urllib.parse
+import pandas as pd
 import re
-from pathlib import Path
 import logging
+import os
 
-# Configure logging
+# Load model + top-32 features
+MODEL_PATH = "models/lightgbm_model.pkl"
+FEATURE_PATH = "models/lightgbm_features.json"
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Page configuration
+model = joblib.load(MODEL_PATH)
+feature_columns = json.load(open(FEATURE_PATH))
+
 st.set_page_config(
     page_title="Phishing URL Detection",
     page_icon="🛡️",
@@ -20,85 +23,28 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-@st.cache_resource
-def load_model_and_features():
-    """Load the trained model and feature information"""
-    try:
-        # Load the model
-        model = joblib.load('phish_model.pkl')
-        
-        # Load feature columns
-        with open('feature_columns.pkl', 'rb') as f:
-            feature_columns = pickle.load(f)
-        
-        # Load model info
-        with open('model_info.pkl', 'rb') as f:
-            model_info = pickle.load(f)
-            
-        return model, feature_columns, model_info
-    except Exception as e:
-        logger.error(f"Error loading model: {str(e)}")
-        return None, None, None
-
-def extract_url_features(url):
-    """
-    Extract features from URL for phishing detection.
-    This is a placeholder function - you'll need to implement the same
-    feature extraction logic used in your training data.
-    """
-    features = {}
-    
-    try:
-        parsed_url = urllib.parse.urlparse(url)
-        domain = parsed_url.netloc.lower()
-        path = parsed_url.path
-        query = parsed_url.query
-        
-        # Basic URL features (implement based on your dataset features)
-        features['url_length'] = len(url)
-        features['domain_length'] = len(domain)
-        features['path_length'] = len(path)
-        features['query_length'] = len(query)
-        
-        # Count specific characters
-        features['dots_count'] = url.count('.')
-        features['hyphens_count'] = url.count('-')
-        features['underscores_count'] = url.count('_')
-        features['slashes_count'] = url.count('/')
-        features['questionmarks_count'] = url.count('?')
-        features['equals_count'] = url.count('=')
-        features['amps_count'] = url.count('&')
-        
-        # Protocol features
-        features['is_https'] = 1 if parsed_url.scheme == 'https' else 0
-        features['is_http'] = 1 if parsed_url.scheme == 'http' else 0
-        
-        # Suspicious patterns
-        features['has_ip'] = 1 if re.search(r'\d+\.\d+\.\d+\.\d+', domain) else 0
-        features['has_suspicious_words'] = 1 if any(word in url.lower() for word in 
-                                                  ['secure', 'account', 'update', 'suspended', 'verify', 'login']) else 0
-        
-        # Subdomain count
-        subdomains = domain.split('.')
-        features['subdomain_count'] = len(subdomains) - 2 if len(subdomains) > 2 else 0
-        
-        # Port usage
-        features['has_port'] = 1 if ':' in parsed_url.netloc and parsed_url.port else 0
-        
-        # Add more features as needed based on your training data
-        
-    except Exception as e:
-        logger.error(f"Error extracting features from URL: {str(e)}")
-        # Return default features if extraction fails
-        return {f'feature_{i}': 0 for i in range(20)}
-    
+def extract_features_from_url(url: str) -> dict:
+    url = url.strip()
+    host = re.sub(r"^https?://", "", url).split('/')[0]
+    features = {
+        "having_IP_Address": int(bool(re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", host))),
+        "URL_Length": len(url),
+        "Shortining_Service": int(any(s in url for s in ["bit.ly", "tinyurl", "t.co", "is.gd"])),
+        "having_At_Symbol": int("@" in url),
+        "double_slash_redirecting": int(url.count("//") > 1),
+        "Prefix_Suffix": int("-" in host),
+        "having_Sub_Domain": host.count("."),
+    }
+    for feat in feature_columns:
+        if feat not in features:
+            features[feat] = 0  # pad missing engineered features
     return features
 
 def predict_phishing(url, model, feature_columns):
     """Predict if a URL is phishing or legitimate"""
     try:
         # Extract features from URL
-        url_features = extract_url_features(url)
+        url_features = extract_features_from_url(url)
         
         # Create DataFrame with the same columns as training data
         feature_df = pd.DataFrame([url_features])
@@ -123,35 +69,9 @@ def predict_phishing(url, model, feature_columns):
         return None, None
 
 def main():
-    # Load model and features
-    model, feature_columns, model_info = load_model_and_features()
-    
-    if model is None:
-        st.error("❌ Failed to load the model. Please check if model files are available.")
-        st.info("Required files: xgboost_phishing_model.pkl, feature_columns.pkl, model_info.pkl")
-        return
-    
-    # Header
     st.title("🛡️ Phishing URL Detection System")
     st.markdown("### Detect malicious URLs using Machine Learning")
-    
-    # Sidebar with model information
-    with st.sidebar:
-        st.header("📊 Model Information")
-        if model_info:
-            st.write(f"**Model Type:** {model_info.get('model_type', 'XGBoost')}")
-            st.write(f"**Features:** {len(feature_columns)} features")
-            
-            if 'metrics' in model_info:
-                st.subheader("Model Performance")
-                metrics = model_info['metrics']
-                st.write(f"**Accuracy:** {metrics.get('Accuracy', 0):.4f}")
-                st.write(f"**Precision:** {metrics.get('Precision', 0):.4f}")
-                st.write(f"**Recall:** {metrics.get('Recall', 0):.4f}")
-                st.write(f"**F1-Score:** {metrics.get('F1', 0):.4f}")
-                st.write(f"**ROC AUC:** {metrics.get('ROC_AUC', 0):.4f}")
-    
-    # Main interface
+
     col1, col2 = st.columns([2, 1])
     
     with col1:
